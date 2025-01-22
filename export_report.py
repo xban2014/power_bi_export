@@ -6,7 +6,8 @@ import time
 import requests
 import json
 
-host = "https://wabi-daily-us-east2-redirect.analysis.windows.net"
+# plug in the host you need (can take from dev tools in browser).
+host = "https://api.powerbi.com"
 
 # Replace with your workspace id, if you want to export a report from a workspace,
 # otherwise leave it as None to export a report from MyWorkspace
