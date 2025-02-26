@@ -90,18 +90,8 @@ def trace(msg, requestId=None):
 
 def main():
 
-    # PBI_ACCESS_TOKEN environment variable if defined as an environment variable will override the interactive login
-    accessToken = os.getenv("PBI_ACCESS_TOKEN")
-    if not accessToken:
-        app = InteractiveBrowserCredential()
-        scope = 'https://analysis.windows.net/powerbi/api/user_impersonation'
-        accessToken = app.get_token(scope)
-        if not accessToken:
-            raise ValueError("Access token could not be obtained. Please set the PBI_ACCESS_TOKEN environment variable.")
-        accessToken = accessToken.token
-
     parser = argparse.ArgumentParser(description="Export reports concurrently.")
-    parser.add_argument('--cluster', type=str,  choices=['daily', 'dxt', 'msit'], default='daily', help='Cluster to use: daily, dxt or msit')
+    parser.add_argument('--cluster', type=str,  choices=['daily', 'dxt', 'msit', 'prod'], default='daily', help='Cluster to use: daily, dxt, msit, prod')
     parser.add_argument('--workspaceId', type=str, help='Workspace ID to export from')
     parser.add_argument('--reportId', type=str, help='Report ID to export')
     parser.add_argument('--concurrency', type=int, default=1, help='Number of concurrent exports')
@@ -116,14 +106,35 @@ def main():
     if not reportId:
         raise ValueError("Report ID is required.")
 
+    # PBI_ACCESS_TOKEN environment variable if defined as an environment variable will override the interactive login
+    accessToken = os.getenv("PBI_ACCESS_TOKEN")
+    if not accessToken:
+        app = InteractiveBrowserCredential()
+        scope = 'https://analysis.windows.net/powerbi/api/user_impersonation'
+        accessToken = app.get_token(scope)
+        if not accessToken:
+            raise ValueError("Access token could not be obtained. Please set the PBI_ACCESS_TOKEN environment variable.")
+        accessToken = accessToken.token
+
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {accessToken}"
     }
 
     # customize the export request here
+    # TODO allow reading from file instead of editing script.
     exportRequest = {
-        "format": "PDF"  
+        "format": "PDF",
+        # "powerBIReportConfiguration": {
+        #     "settings": {},
+        #     "powerBIReportConfiguration": {
+        #         "reportLevelFilters": [
+        #             {
+        #                 "filter": "Table1/CategoryName eq 'Condiments'"
+        #             }
+        #         ]
+        #     }
+        # }
     }
 
     # you can get the host from the service in web tools
@@ -134,7 +145,7 @@ def main():
     elif args.cluster == 'msit':
         host = "https://df-msit-scus-redirect.analysis.windows.net"
     else:
-        raise ValueError("Invalid cluster specified.")
+        host = "https://api.powerbi.com"
 
     
     context = ExportContext(accessToken, workspaceId, reportId, host, headers, exportRequest)
