@@ -144,9 +144,10 @@ def main():
         host = "https://wabi-staging-us-east-redirect.analysis.windows.net"
     elif args.cluster == 'msit':
         host = "https://df-msit-scus-redirect.analysis.windows.net"
-    else:
+    elif args.cluster == 'prod':
         host = "https://api.powerbi.com"
-
+    else:
+        raise ValueError("Invalid cluster. Choose from: daily, dxt, msit, prod.")        
     
     context = ExportContext(accessToken, workspaceId, reportId, host, headers, exportRequest)
 
