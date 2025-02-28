@@ -8,7 +8,7 @@ import json
 from azure.identity import InteractiveBrowserCredential
 
 class ExportContext:
-    def __init__(self, accessToken, workspaceId, reportId, host, headers, exportRequest):
+    def __init__(self, accessToken, workspaceId, reportId, host, headers, exportRequest, skipDownload):
         self.accessToken = accessToken
         self.workspaceId = workspaceId
         self.reportId = reportId
@@ -16,6 +16,7 @@ class ExportContext:
         self.headers = headers
         self.exportRequest = exportRequest
         self.groupPath = f"groups/{workspaceId}/" if workspaceId else ""
+        self.skipDownload = skipDownload
 
 def startExport(context):
     createUrl = f"{context.host}/v1.0/myorg/{context.groupPath}reports/{context.reportId}/ExportTo"
@@ -61,6 +62,9 @@ def pollExportStatus(context, exportId):
 
 def downloadFile(context, response, exportId):
     downloadUrl = response.json().get("resourceLocation")
+    if (context.skipDownload):
+        trace(f"Skipping download of {downloadUrl}")
+        return
     response = requests.get(downloadUrl, headers=context.headers)
     requestId = response.headers.get("RequestId")
     if response.status_code == 200:
@@ -96,13 +100,15 @@ def main():
     parser.add_argument('--reportId', type=str, help='Report ID to export')
     parser.add_argument('--concurrency', type=int, default=1, help='Number of concurrent exports')
     parser.add_argument('--numExports', type=int, default=1, help='Total number of exports to perform')
-    parser.add_argument('--skipDownload', type=bool, default=0, help='Do not download the results')
+    parser.add_argument('--skipDownload', action='store_true', help='Do not download the results')
     args = parser.parse_args()
 
     workspaceId = args.workspaceId
     reportId = args.reportId
     concurrency = args.concurrency
     numExports = args.numExports
+    skipDownload = args.skipDownload
+
     if not reportId:
         raise ValueError("Report ID is required.")
 
@@ -149,7 +155,7 @@ def main():
     else:
         raise ValueError("Invalid cluster. Choose from: daily, dxt, msit, prod.")        
     
-    context = ExportContext(accessToken, workspaceId, reportId, host, headers, exportRequest)
+    context = ExportContext(accessToken, workspaceId, reportId, host, headers, exportRequest, skipDownload)
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = [executor.submit(fullExport, context) for _ in range(numExports)]
