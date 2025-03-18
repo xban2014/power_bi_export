@@ -112,7 +112,7 @@ def main():
     if not reportId:
         raise ValueError("Report ID is required.")
 
-    # PBI_ACCESS_TOKEN environment variable if defined as an environment variable will override the interactive login
+    # PBI_ACCESS_TOKEN environment variable -- if defined -- will override the interactive login
     accessToken = os.getenv("PBI_ACCESS_TOKEN")
     if not accessToken:
         app = InteractiveBrowserCredential()
