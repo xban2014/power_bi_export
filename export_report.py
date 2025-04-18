@@ -144,18 +144,20 @@ def pollExportStatus(context, exportId):
     
     while status != "Succeeded" and status != "Failed":
         try:
-            response = context.http.request('GET', statusUrl, headers=context.headers)
-            requestId = response.headers.get("RequestId")
-            if response.status in [200, 202]:
-                rjson = response.json()
-                status = rjson.get("status")
-                pctComplete = rjson.get("percentComplete")
-                trace(f"Export status: {status} ({pctComplete}%)", requestId)
-                time.sleep(1)
-            else:
-                trace(f"Failed to get export status. Status code: {response.status}, url: {statusUrl}", requestId)
-                trace(f"Response: {response.data.decode('utf-8')}", requestId)
-                return "Failed", response
+            with ResponseContextManager(
+                context.http.request('GET', statusUrl, headers=context.headers)
+            ) as response:
+                requestId = response.headers.get("RequestId")
+                if response.status in [200, 202]:
+                    rjson = response.json()
+                    status = rjson.get("status")
+                    pctComplete = rjson.get("percentComplete")
+                    trace(f"Export status: {status} ({pctComplete}%)", requestId)
+                    time.sleep(1)
+                else:
+                    trace(f"Failed to get export status. Status code: {response.status}, url: {statusUrl}", requestId)
+                    trace(f"Response: {response.data.decode('utf-8')}", requestId)
+                    return "Failed", response
         except Exception as e:
             trace(f"An error occurred: {e}", requestId if 'requestId' in locals() else None)
             return "Failed", response
@@ -198,7 +200,7 @@ def downloadFile(context, response, exportId):
                 end_time = time.time()
                 duration = end_time - start_time
                 file_size = os.path.getsize(filename)
-                trace(f"(urllib3) Downloaded file to {filename} in {duration:.2f} seconds, size: {file_size} bytes", requestId)
+                trace(f"Downloaded file to {filename} in {duration:.2f} seconds, size: {file_size} bytes", requestId)
             else:
                 trace(f"Failed to download file. Status code: {response.status}, url: {downloadUrl}", requestId)
                 trace(f"Response: {response.data.decode('utf-8')}", requestId)
