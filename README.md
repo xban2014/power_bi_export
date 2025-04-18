@@ -16,7 +16,7 @@ Relevant documentation:
 `python export_report.py [--host <host>] --workspaceId <workspaceId> --reportId <reportId> [--numExports <number of exports>] [--concurrency <thread count] [--exportRequestFile <file>] [--skipDownload]`
 
 where:
-- `host` is one of `daily`, `dxt` or `msit`. If not specified, defaults to `daily`
+- `host` is one of `daily`, `dxt`, `msit` or `prod`. If not specified, defaults to `prod`
 - `workspaceId` is the workspace/group id for your report
 - `reportId` is the report id
 - `numExports` can be set to a number higher than 1 if you want the exports to run in a loop
