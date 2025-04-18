@@ -305,15 +305,11 @@ def main():
     else:
         raise ValueError("Invalid cluster. Choose from: daily, dxt, msit, prod.")
     
-    # Use the context manager
     with ExportContext(accessToken, workspaceId, reportId, host, headers, exportRequest, skipDownload) as context:
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = [executor.submit(fullExport, context) for _ in range(numExports)]
             for future in futures:
                 future.result()
-    
-    # No need to call context.http.clear() here - it's handled by the context manager
-
 
 if __name__ == "__main__":
     main()
