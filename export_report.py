@@ -240,8 +240,8 @@ def main():
     Main function to parse arguments and execute the export process.
     """
     parser = argparse.ArgumentParser(description="Export reports concurrently.")
-    parser.add_argument('--cluster', type=str, choices=['daily', 'dxt', 'msit', 'prod'], default='daily', 
-                        help='Cluster to use: daily, dxt, msit, prod')
+    parser.add_argument('--cluster', type=str, choices=['daily', 'dxt', 'msit', 'prod'], default='prod', 
+                        help='Cluster to use: daily, dxt, msit, prod (default: prod)')
     parser.add_argument('--workspaceId', type=str, help='Workspace ID to export from')
     parser.add_argument('--reportId', type=str, help='Report ID to export')
     parser.add_argument('--concurrency', type=int, default=1, help='Number of concurrent exports')
