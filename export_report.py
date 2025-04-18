@@ -62,7 +62,7 @@ def pollExportStatus(context, exportId):
 
 def downloadFile(context, response, exportId):
     downloadUrl = response.json().get("resourceLocation")
-    if context.skipDownload:
+    if (context.skipDownload):
         trace(f"Skipping download of {downloadUrl}")
         return
     response = requests.get(downloadUrl, headers=context.headers)
@@ -93,14 +93,14 @@ def trace(msg, requestId=None):
     print(f"[{now}] [Thr:{threadId}] [RAID:{requestId}] {msg}")
 
 def main():
+
     parser = argparse.ArgumentParser(description="Export reports concurrently.")
-    parser.add_argument('--cluster', type=str, choices=['daily', 'dxt', 'msit', 'prod'], default='daily', help='Cluster to use: daily, dxt, msit, prod')
+    parser.add_argument('--cluster', type=str,  choices=['daily', 'dxt', 'msit', 'prod'], default='daily', help='Cluster to use: daily, dxt, msit, prod')
     parser.add_argument('--workspaceId', type=str, help='Workspace ID to export from')
     parser.add_argument('--reportId', type=str, help='Report ID to export')
     parser.add_argument('--concurrency', type=int, default=1, help='Number of concurrent exports')
     parser.add_argument('--numExports', type=int, default=1, help='Total number of exports to perform')
     parser.add_argument('--skipDownload', action='store_true', help='Do not download the results')
-    parser.add_argument('--exportRequestFile', type=str, help='Path to the export request JSON file')
     args = parser.parse_args()
 
     workspaceId = args.workspaceId
@@ -112,7 +112,7 @@ def main():
     if not reportId:
         raise ValueError("Report ID is required.")
 
-    # PBI_ACCESS_TOKEN environment variable -- if defined -- will override the interactive login
+    # PBI_ACCESS_TOKEN environment variable if defined as an environment variable will override the interactive login
     accessToken = os.getenv("PBI_ACCESS_TOKEN")
     if not accessToken:
         app = InteractiveBrowserCredential()
@@ -127,24 +127,21 @@ def main():
         "Authorization": f"Bearer {accessToken}"
     }
 
-    # Read export request from file if provided, otherwise use default
-    if args.exportRequestFile:
-        with open(args.exportRequestFile, 'r') as file:
-            exportRequest = json.load(file)
-    else:
-        exportRequest = {
-            "format": "PDF",
-            # "powerBIReportConfiguration": {
-            #     "settings": {},
-            #     "powerBIReportConfiguration": {
-            #         "reportLevelFilters": [
-            #             {
-            #                 "filter": "Table1/CategoryName eq 'Condiments'"
-            #             }
-            #         ]
-            #     }
-            # }
-        }
+    # customize the export request here
+    # TODO allow reading from file instead of editing script.
+    exportRequest = {
+        "format": "PDF",
+        # "powerBIReportConfiguration": {
+        #     "settings": {},
+        #     "powerBIReportConfiguration": {
+        #         "reportLevelFilters": [
+        #             {
+        #                 "filter": "Table1/CategoryName eq 'Condiments'"
+        #             }
+        #         ]
+        #     }
+        # }
+    }
 
     # you can get the host from the service in web tools
     if args.cluster == 'daily':
