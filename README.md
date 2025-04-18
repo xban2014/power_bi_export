@@ -8,7 +8,7 @@ Relevant documentation:
 ## Prerequisites
 
 - Python
-- Requests library (`pip install requests`)
+- Urllib3 library (`pip install urllib3`)
 - Azure identity (`pip install azure.identity`)
 
 ## Usage
