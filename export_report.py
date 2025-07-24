@@ -51,7 +51,7 @@ class ExportContext:
     and HTTP client instance.
     """
     
-    def __init__(self, accessToken, workspaceId, reportId, host, headers, exportRequest, skipDownload):
+    def __init__(self, accessToken, workspaceId, reportId, host, headers, exportRequest, discardDownload):
         """
         Initialize the export context with the provided parameters.
         
@@ -62,7 +62,7 @@ class ExportContext:
             host (str): The Power BI API host URL.
             headers (dict): HTTP headers to be included in API requests.
             exportRequest (dict): The export configuration parameters.
-            skipDownload (bool): Flag indicating whether to skip downloading the export result.
+            discardDownload (bool): Flag indicating whether to discard the downloaded export result.
         """
         self.accessToken = accessToken
         self.workspaceId = workspaceId
@@ -71,7 +71,7 @@ class ExportContext:
         self.headers = headers
         self.exportRequest = exportRequest
         self.groupPath = f"groups/{workspaceId}/" if workspaceId else ""
-        self.skipDownload = skipDownload
+        self.discardDownload = discardDownload
         self.http = urllib3.PoolManager()
         
     def __enter__(self):
@@ -175,22 +175,34 @@ def downloadFile(context, response, exportId):
         exportId (str): The ID of the export job.
     """
     downloadUrl = response.json().get("resourceLocation")
-    if context.skipDownload:
-        trace(f"Skipping download of {downloadUrl}")
-        return
-
+    requestId = response.headers.get("RequestId")
+    
+    trace(f"Download URL: {downloadUrl}", None)
+    
     try:
         start_time = time.time()
         
         with ResponseContextManager(
             context.http.request('GET', downloadUrl, headers=context.headers, preload_content=False)
         ) as response:
-            requestId = response.headers.get("RequestId")
             if response.status == 200:
                 timestamp = time.strftime("%Y%m%d_%H%M%S")
+
+                # consume the response stream, but do not write to disk:
+                if context.discardDownload:
+                    trace(f"Downloading file to /dev/null...", requestId)
+                    for chunk in response.stream(8192):
+                        if not chunk:
+                            break
+                    
+                    end_time = time.time()
+                    duration = end_time - start_time                        
+                    trace(f"Downloaded file to /dev/null in {duration:.2f} seconds", requestId)
+                    return
+
+                # write the response stream to a file:
                 os.makedirs("downloads", exist_ok=True)
                 filename = f"downloads/export_{context.reportId}_{exportId[:20]}_{timestamp}.pdf"
-                
                 with open(filename, "wb") as file:
                     for chunk in response.stream(8192):
                         if not chunk:
@@ -198,7 +210,7 @@ def downloadFile(context, response, exportId):
                         file.write(chunk)
                 
                 end_time = time.time()
-                duration = end_time - start_time
+                duration = end_time - start_time               
                 file_size = os.path.getsize(filename)
                 trace(f"Downloaded file to {filename} in {duration:.2f} seconds, size: {file_size} bytes", requestId)
             else:
@@ -246,7 +258,7 @@ def main():
     parser.add_argument('--reportId', type=str, help='Report ID to export')
     parser.add_argument('--concurrency', type=int, default=1, help='Number of concurrent exports')
     parser.add_argument('--numExports', type=int, default=1, help='Total number of exports to perform')
-    parser.add_argument('--skipDownload', action='store_true', help='Do not download the results')
+    parser.add_argument('--discardDownload', action='store_true', help='Download the results but throw away the data')
     parser.add_argument('--exportRequestFile', type=str, help='Path to the export request JSON file')
     args = parser.parse_args()
 
@@ -254,7 +266,7 @@ def main():
     reportId = args.reportId
     concurrency = args.concurrency
     numExports = args.numExports
-    skipDownload = args.skipDownload
+    discardDownload = args.discardDownload
 
     if not reportId:
         raise ValueError("Report ID is required.")
@@ -305,7 +317,7 @@ def main():
     else:
         raise ValueError("Invalid cluster. Choose from: daily, dxt, msit, prod.")
     
-    with ExportContext(accessToken, workspaceId, reportId, host, headers, exportRequest, skipDownload) as context:
+    with ExportContext(accessToken, workspaceId, reportId, host, headers, exportRequest, discardDownload) as context:
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = [executor.submit(fullExport, context) for _ in range(numExports)]
             for future in futures:
