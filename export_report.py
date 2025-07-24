@@ -141,6 +141,7 @@ def pollExportStatus(context, exportId):
     statusUrl = f"{context.host}/v1.0/myorg/{context.groupPath}reports/{context.reportId}/exports/{exportId}"
     status = None
     response = None
+    pollIntervalSeconds = 1
     
     while status != "Succeeded" and status != "Failed":
         try:
@@ -153,11 +154,15 @@ def pollExportStatus(context, exportId):
                     status = rjson.get("status")
                     pctComplete = rjson.get("percentComplete")
                     trace(f"Export status: {status} ({pctComplete}%)", requestId)
-                    time.sleep(1)
+                    time.sleep(pollIntervalSeconds)
                 else:
                     trace(f"Failed to get export status. Status code: {response.status}, url: {statusUrl}", requestId)
                     trace(f"Response: {response.data.decode('utf-8')}", requestId)
-                    return "Failed", response
+                    if response.status == 429:
+                        trace(f"Rate limited. Increasing poll interval to {pollIntervalSeconds * 2} seconds...", requestId)
+                        time.sleep(pollIntervalSeconds * 2)
+                    else:
+                        return "Failed", response
         except Exception as e:
             trace(f"An error occurred: {e}", requestId if 'requestId' in locals() else None)
             return "Failed", response
