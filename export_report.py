@@ -190,8 +190,8 @@ def pollExportStatus(context: ExportContext, exportId: str):
                         if retryAfterSeconds:
                             pollIntervalSeconds = retryAfterSeconds
                         elif pollIntervalSeconds < 16:
-                            trace(f"Increasing poll interval to {pollIntervalSeconds} seconds...", requestId)
                             pollIntervalSeconds = pollIntervalSeconds * 2
+                            trace(f"Increasing poll interval to {pollIntervalSeconds} seconds...", requestId)
                     else:
                         return "Failed", response
 
