@@ -32,19 +32,23 @@ This script provides functionality to export Power BI reports concurrently.
 It handles authentication, export request submission, status polling, and file downloads.
 """
 
+# Standard library imports
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+import json
+import logging
 import os
 import threading
 import time
-import json
-from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, Optional, Tuple
+
+# Third-party imports
 import urllib3
 from azure.identity import InteractiveBrowserCredential
-import logging
 
 # start of the program
 epoch = int(time.time())
+
 
 class ExportContext:
     """
@@ -57,13 +61,13 @@ class ExportContext:
 
     def __init__(
         self,
-        accessToken,
-        workspaceId,
-        reportId,
-        host,
-        headers,
-        exportRequest,
-        discardDownload,
+        accessToken: str,
+        workspaceId: Optional[str],
+        reportId: str,
+        host: str,
+        headers: Dict[str, str],
+        exportRequest: Dict[str, Any],
+        discardDownload: bool,
     ):
         """
         Initialize the export context with the provided parameters.
@@ -86,12 +90,36 @@ class ExportContext:
         self.groupPath = f"groups/{workspaceId}/" if workspaceId else ""
         self.discardDownload = discardDownload
         self.http = urllib3.PoolManager(retries=False)
+        self.requestId = None  # Will be set from response headers
 
-    def __enter__(self):
+    def trace(self, msg: str):
+        """
+        Print a message with the seconds after the program start, the timestamp, thread ID, and request ID.
+
+        Args:
+            msg (str): The message to print.
+        """
+        t = time.time()
+        now = int(t)  # Unfortunately this is only at the second level.
+        delta = now - epoch
+        strTime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
+        threadId = threading.current_thread().ident
+        print(f"[{delta}] [{strTime}] [Thr:{threadId}] [RAID:{self.requestId}] {msg}")
+
+    def setRequestId(self, response: urllib3.HTTPResponse) -> None:
+        """
+        Extract and set the request ID from an HTTP response object.
+
+        Args:
+            response: The HTTP response object containing headers.
+        """
+        self.requestId = response.headers.get("RequestId")
+
+    def __enter__(self) -> 'ExportContext':
         """Enter the context manager."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: Optional[type], exc_val: Optional[Exception], exc_tb: Optional[Any]) -> None:
         """Exit the context manager and clean up resources."""
         self.http.clear()
 
@@ -99,18 +127,18 @@ class ExportContext:
 class ResponseContextManager:
     """Context manager for urllib3 response objects."""
 
-    def __init__(self, response):
+    def __init__(self, response: urllib3.HTTPResponse):
         self.response = response
 
-    def __enter__(self):
+    def __enter__(self) -> urllib3.HTTPResponse:
         return self.response
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: Optional[type], exc_val: Optional[Exception], exc_tb: Optional[Any]) -> None:
         if hasattr(self.response, "release_conn"):
             self.response.release_conn()
 
 
-def startExport(context: ExportContext):
+def startExport(context: ExportContext) -> Optional[str]:
     """
     Start a new export job for a Power BI report.
 
@@ -130,22 +158,22 @@ def startExport(context: ExportContext):
                 body=json.dumps(context.exportRequest),
             )
         ) as response:
-            requestId = response.headers.get("RequestId")
-            trace(f"Export started at {time.strftime('%Y-%m-%d %H:%M:%S')} for {createUrl}", requestId)
+            context.setRequestId(response)
+            context.trace(f"Export started at {time.strftime('%Y-%m-%d %H:%M:%S')} for {createUrl}")
             if response.status == 202:
                 exportId = response.json().get("id")
-                trace(f"Export id: {exportId} started successfully", requestId)
+                context.trace(f"Export id: {exportId} started successfully")
                 return exportId
             else:
-                trace(f"Failed to start export. Status code: {response.status}", requestId)
-                trace(f"Response: {response.data.decode('utf-8')}", requestId)
+                context.trace(f"Failed to start export. Status code: {response.status}")
+                context.trace(f"Response: {response.data.decode('utf-8')}")
                 return None
     except Exception as e:
-        trace(f"An error occurred: {e}", None)
+        context.trace(f"An error occurred: {e}")
         return None
 
 
-def pollExportStatus(context: ExportContext, exportId: str):
+def pollExportStatus(context: ExportContext, exportId: str) -> Tuple[str, urllib3.HTTPResponse]:
     """
     Poll the status of an export job until it completes or fails.
 
@@ -163,50 +191,53 @@ def pollExportStatus(context: ExportContext, exportId: str):
 
     while status != "Succeeded" and status != "Failed":
         try:
-            # trace(f"Polling export status for {statusUrl}")
+            # context.trace(f"Polling export status for {statusUrl}")
             with ResponseContextManager(context.http.request("GET", statusUrl, headers=context.headers)) as response:
-                requestId = response.headers.get("RequestId")
+                context.setRequestId(response)
 
                 if response.status in [200, 202]:
                     rjson = response.json()
                     status = rjson.get("status")
                     pctComplete = rjson.get("percentComplete")
-                    trace(f"Export status: {status} ({pctComplete}%), sleeping {pollIntervalSeconds} seconds...", requestId)
+                    context.trace(
+                        f"Export status: {status} ({pctComplete}%), sleeping {pollIntervalSeconds} seconds..."
+                    )
                 else:
-                    trace(f"Failed to get export status. Status code: {response.status}, url: {statusUrl}", requestId)
-                    trace(f"Response: {response.data.decode('utf-8')}", requestId)
+                    context.trace(f"Failed to get export status. Status code: {response.status}, url: {statusUrl}")
+                    context.trace(f"Response: {response.data.decode('utf-8')}")
 
                     if response.status == 429:
                         retryAfter = response.headers.get("Retry-After")
-                        trace(f"Rate limited (retry-after: {retryAfter}) ...", requestId)
+                        context.trace(f"Rate limited (retry-after: {retryAfter}) ...")
 
                         retryAfterSeconds = None
                         if retryAfter:
                             try:
                                 retryAfterSeconds = int(retryAfter)
                             except ValueError:
-                                trace(f"Invalid Retry-After header value: {retryAfter}", requestId)
+                                context.trace(f"Invalid Retry-After header value: {retryAfter}")
 
                         if retryAfterSeconds:
                             pollIntervalSeconds = retryAfterSeconds
                         elif pollIntervalSeconds < 16:
                             pollIntervalSeconds = pollIntervalSeconds * 2
-                            trace(f"Increasing poll interval to {pollIntervalSeconds} seconds...", requestId)
+                            context.trace(f"Increasing poll interval to {pollIntervalSeconds} seconds...")
                     else:
                         return "Failed", response
 
                 # take a break before polling again
                 if pctComplete < 100:
-                    trace(f"Sleeping {pollIntervalSeconds} seconds...", requestId)
+                    context.trace(f"Sleeping {pollIntervalSeconds} seconds...")
                     time.sleep(pollIntervalSeconds)
 
         except Exception as e:
-            trace(f"An error occurred: {e}", requestId if "requestId" in locals() else None)
+            context.trace(f"An error occurred: {e}")
             return "Failed", response
 
     return status, response
 
-def downloadFile(context: ExportContext, response: urllib3.HTTPResponse, exportId: str):
+
+def downloadFile(context: ExportContext, response: urllib3.HTTPResponse, exportId: str) -> None:
     """
     Download the exported file if the export was successful.
 
@@ -216,9 +247,9 @@ def downloadFile(context: ExportContext, response: urllib3.HTTPResponse, exportI
         exportId (str): The ID of the export job.
     """
     downloadUrl = response.json().get("resourceLocation")
-    requestId = response.headers.get("RequestId")
+    context.setRequestId(response)
 
-    trace(f"Download URL: {downloadUrl}", requestId)
+    context.trace(f"Download URL: {downloadUrl}")
 
     try:
         start_time = time.time()
@@ -231,14 +262,14 @@ def downloadFile(context: ExportContext, response: urllib3.HTTPResponse, exportI
 
                 # consume the response stream, but do not write to disk:
                 if context.discardDownload:
-                    trace(f"Downloading file to /dev/null...", requestId)
+                    context.trace(f"Downloading file to /dev/null...")
                     for chunk in response.stream(8192):
                         if not chunk:
                             break
 
                     end_time = time.time()
                     duration = end_time - start_time
-                    trace(f"Downloaded file to /dev/null in {duration:.2f} seconds", requestId)
+                    context.trace(f"Downloaded file to /dev/null in {duration:.2f} seconds")
                     return
 
                 # write the response stream to a file:
@@ -253,15 +284,15 @@ def downloadFile(context: ExportContext, response: urllib3.HTTPResponse, exportI
                 end_time = time.time()
                 duration = end_time - start_time
                 file_size = os.path.getsize(filename)
-                trace(f"Downloaded file to {filename} in {duration:.2f} seconds, size: {file_size} bytes", requestId)
+                context.trace(f"Downloaded file to {filename} in {duration:.2f} seconds, size: {file_size} bytes")
             else:
-                trace(f"Failed to download file. Status code: {response.status}, url: {downloadUrl}", requestId)
-                trace(f"Response: {response.data.decode('utf-8')}", requestId)
+                context.trace(f"Failed to download file. Status code: {response.status}, url: {downloadUrl}")
+                context.trace(f"Response: {response.data.decode('utf-8')}")
     except Exception as e:
-        trace(f"An error occurred: {e}", requestId if "requestId" in locals() else None)
+        context.trace(f"An error occurred: {e}")
 
 
-def fullExport(context: ExportContext):
+def fullExport(context: ExportContext) -> None:
     """
     Execute the full export workflow: start export, poll status, and download the file.
 
@@ -275,23 +306,7 @@ def fullExport(context: ExportContext):
             downloadFile(context, response, exportId)
 
 
-def trace(msg: str, requestId: Optional[str] = None):
-    """
-    Print a message with a timestamp, thread ID, and request ID.
-
-    Args:
-        msg (str): The message to print.
-        requestId (str, optional): The request ID to include in the trace.
-    """
-    t = time.time()
-    now = int(t)  # Unfortunately this is only at the second level.
-    delta = now - epoch
-    strTime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
-    threadId = threading.current_thread().ident
-    print(f"[{delta}] [{strTime}] [Thr:{threadId}] [RAID:{requestId}] {msg}")
-
-
-def main():
+def main() -> None:
     """
     Main function to parse arguments and execute the export process.
     """
@@ -341,7 +356,9 @@ def main():
         scope = "https://analysis.windows.net/powerbi/api/user_impersonation"
         accessToken = app.get_token(scope)
         if not accessToken:
-            raise ValueError("Access token could not be obtained. Please set the PBI_ACCESS_TOKEN environment variable.")
+            raise ValueError(
+                "Access token could not be obtained. Please set the PBI_ACCESS_TOKEN environment variable."
+            )
         accessToken = accessToken.token
 
     headers = {
