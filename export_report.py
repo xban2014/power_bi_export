@@ -274,7 +274,8 @@ def downloadFile(context: ExportContext, response: urllib3.HTTPResponse, exportI
 
                 # write the response stream to a file:
                 os.makedirs("downloads", exist_ok=True)
-                filename = f"downloads/export_{context.reportId}_{exportId[:20]}_{timestamp}.pdf"
+                fileExtension = context.exportRequest.get("format", "pdf").lower()
+                filename = f"downloads/export_{context.reportId}_{exportId[:20]}_{timestamp}.{fileExtension}"
                 with open(filename, "wb") as file:
                     for chunk in response.stream(8192):
                         if not chunk:
