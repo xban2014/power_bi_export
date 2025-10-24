@@ -61,6 +61,8 @@ class ExportContext:
 
     def __init__(
         self,
+        exportNumber: int,
+        http: urllib3.PoolManager,
         accessToken: str,
         workspaceId: Optional[str],
         reportId: str,
@@ -81,6 +83,8 @@ class ExportContext:
             exportRequest (dict): The export configuration parameters.
             discardDownload (bool): Flag indicating whether to discard the downloaded export result.
         """
+        self.exportNumber = exportNumber
+        self.http = http
         self.accessToken = accessToken
         self.workspaceId = workspaceId
         self.reportId = reportId
@@ -89,7 +93,7 @@ class ExportContext:
         self.exportRequest = exportRequest
         self.groupPath = f"groups/{workspaceId}/" if workspaceId else ""
         self.discardDownload = discardDownload
-        self.http = urllib3.PoolManager(retries=False)
+        self.phase = "init"
         self.requestId = None  # Will be set from response headers
 
     def trace(self, msg: str):
@@ -104,7 +108,7 @@ class ExportContext:
         delta = now - epoch
         strTime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
         threadId = threading.current_thread().ident
-        print(f"[{delta}] [{strTime}] [Thr:{threadId}] [RAID:{self.requestId}] {msg}")
+        print(f"[{delta}s] [{strTime}] [Thr:{threadId}] [{self.exportNumber}:{self.phase}] [RAID:{self.requestId}] {msg}")
 
     def setRequestId(self, response: urllib3.HTTPResponse) -> None:
         """
@@ -115,14 +119,45 @@ class ExportContext:
         """
         self.requestId = response.headers.get("RequestId")
 
-    def __enter__(self) -> 'ExportContext':
-        """Enter the context manager."""
-        return self
+    def requestWithRetry(
+        self,
+        httpMethod: str,
+        url: str,
+        maxInterval: int = 16,
+        baseInterval: int = 1,
+        **request_kwargs: Any,
+    ) -> urllib3.HTTPResponse:
+        """Issue an HTTP request with automatic 429/back-off handling."""
 
-    def __exit__(self, exc_type: Optional[type], exc_val: Optional[Exception], exc_tb: Optional[Any]) -> None:
-        """Exit the context manager and clean up resources."""
-        self.http.clear()
+        delay = baseInterval
 
+        while True:
+            response = self.http.request(httpMethod, url, **request_kwargs)
+            self.setRequestId(response)
+
+            if response.status != 429:
+                return response  # caller must close/release via ResponseContextManager
+
+            self.trace(f"Rate limited (status 429) on {url}")
+  
+            retry_after = response.headers.get("Retry-After")
+
+            # release connection before looping again.
+            response.release_conn()
+
+            if retry_after:
+                try:
+                    delay = int(retry_after)
+                    self.trace(f"Sleeping {delay} seconds per Retry-After header")
+                except ValueError:
+                    self.trace(f"Ignoring invalid Retry-After value '{retry_after}'")
+
+            if delay:
+                self.trace(f"Sleeping {delay} seconds before retrying…")
+                time.sleep(delay)
+            
+            if retry_after is None and delay < maxInterval:
+                delay = min(delay * 2, maxInterval)
 
 class ResponseContextManager:
     """Context manager for urllib3 response objects."""
@@ -148,18 +183,19 @@ def startExport(context: ExportContext) -> Optional[str]:
     Returns:
         str or None: The export ID if successful, None otherwise.
     """
+    context.phase = "start"
     createUrl = f"{context.host}/v1.0/myorg/{context.groupPath}reports/{context.reportId}/ExportTo"
     try:
+        context.trace(f"Export started at {time.strftime('%Y-%m-%d %H:%M:%S')} for {createUrl}")
+
         with ResponseContextManager(
-            context.http.request(
-                "POST",
-                createUrl,
+            context.requestWithRetry(
+                httpMethod="POST",
+                url=createUrl,
                 headers=context.headers,
                 body=json.dumps(context.exportRequest),
             )
         ) as response:
-            context.setRequestId(response)
-            context.trace(f"Export started at {time.strftime('%Y-%m-%d %H:%M:%S')} for {createUrl}")
             if response.status == 202:
                 exportId = response.json().get("id")
                 context.trace(f"Export id: {exportId} started successfully")
@@ -168,6 +204,7 @@ def startExport(context: ExportContext) -> Optional[str]:
                 context.trace(f"Failed to start export. Status code: {response.status}")
                 context.trace(f"Response: {response.data.decode('utf-8')}")
                 return None
+    
     except Exception as e:
         context.trace(f"An error occurred: {e}")
         return None
@@ -184,6 +221,7 @@ def pollExportStatus(context: ExportContext, exportId: str) -> Tuple[str, urllib
     Returns:
         tuple: (status, response) where status is "Succeeded" or "Failed" and response is the HTTP response.
     """
+    context.phase = "poll"
     statusUrl = f"{context.host}/v1.0/myorg/{context.groupPath}reports/{context.reportId}/exports/{exportId}"
     status = None
     response = None
@@ -191,9 +229,9 @@ def pollExportStatus(context: ExportContext, exportId: str) -> Tuple[str, urllib
 
     while status != "Succeeded" and status != "Failed":
         try:
-            # context.trace(f"Polling export status for {statusUrl}")
-            with ResponseContextManager(context.http.request("GET", statusUrl, headers=context.headers)) as response:
-                context.setRequestId(response)
+            context.trace(f"Polling export status for {statusUrl}")
+            
+            with ResponseContextManager(context.requestWithRetry(httpMethod="GET", url=statusUrl, headers=context.headers)) as response:
 
                 if response.status in [200, 202]:
                     rjson = response.json()
@@ -205,25 +243,7 @@ def pollExportStatus(context: ExportContext, exportId: str) -> Tuple[str, urllib
                 else:
                     context.trace(f"Failed to get export status. Status code: {response.status}, url: {statusUrl}")
                     context.trace(f"Response: {response.data.decode('utf-8')}")
-
-                    if response.status == 429:
-                        retryAfter = response.headers.get("Retry-After")
-                        context.trace(f"Rate limited (retry-after: {retryAfter}) ...")
-
-                        retryAfterSeconds = None
-                        if retryAfter:
-                            try:
-                                retryAfterSeconds = int(retryAfter)
-                            except ValueError:
-                                context.trace(f"Invalid Retry-After header value: {retryAfter}")
-
-                        if retryAfterSeconds:
-                            pollIntervalSeconds = retryAfterSeconds
-                        elif pollIntervalSeconds < 16:
-                            pollIntervalSeconds = pollIntervalSeconds * 2
-                            context.trace(f"Increasing poll interval to {pollIntervalSeconds} seconds...")
-                    else:
-                        return "Failed", response
+                    return "Failed", response
 
                 # take a break before polling again
                 if pctComplete < 100:
@@ -246,16 +266,16 @@ def downloadFile(context: ExportContext, response: urllib3.HTTPResponse, exportI
         response (HTTPResponse): The HTTP response from the status polling.
         exportId (str): The ID of the export job.
     """
+    context.phase = "download"
     downloadUrl = response.json().get("resourceLocation")
     context.setRequestId(response)
-
     context.trace(f"Download URL: {downloadUrl}")
 
     try:
         start_time = time.time()
 
         with ResponseContextManager(
-            context.http.request("GET", downloadUrl, headers=context.headers, preload_content=False)
+            context.requestWithRetry(httpMethod="GET", url=downloadUrl, headers=context.headers, preload_content=False)
         ) as response:
             if response.status == 200:
                 timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -400,17 +420,31 @@ def main() -> None:
     else:
         raise ValueError("Invalid cluster. Choose from one of: localhost, onebox, devbox, daily, dxt, msit, or prod.")
 
-    with ExportContext(
-        accessToken,
-        workspaceId,
-        reportId,
-        host,
-        headers,
-        exportRequest,
-        discardDownload,
-    ) as context:
+    # one pool manager for all threads
+    with urllib3.PoolManager(retries=False) as http:
+   
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = [executor.submit(fullExport, context) for _ in range(numExports)]
+
+            # pump all requests into the thread pool queue
+            futures = []
+            for i in range(numExports):        
+                # each request has its own context:
+                future = executor.submit(
+                    fullExport,
+                    ExportContext(
+                        i+1,
+                        http,
+                        accessToken,
+                        workspaceId,
+                        reportId,
+                        host,
+                        headers,
+                        exportRequest,
+                        discardDownload))
+                
+                futures.append(future)
+            
+            # wait for all futures to complete
             for future in futures:
                 future.result()
 
