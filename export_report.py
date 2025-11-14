@@ -75,6 +75,8 @@ class ExportContext:
         Initialize the export context with the provided parameters.
 
         Args:
+            exportNumber (int): The number of the export operation.
+            http (urllib3.PoolManager): The HTTP client instance.
             accessToken (str): The authentication token for Power BI API access.
             workspaceId (str): The ID of the Power BI workspace.
             reportId (str): The ID of the report to be exported.
@@ -108,7 +110,9 @@ class ExportContext:
         delta = now - epoch
         strTime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
         threadId = threading.current_thread().ident
-        print(f"[{delta}s] [{strTime}] [Thr:{threadId}] [{self.exportNumber}:{self.phase}] [RAID:{self.requestId}] {msg}")
+        print(
+            f"[{delta}s] [{strTime}] [Thr:{threadId}] [{self.exportNumber}:{self.phase}] [RAID:{self.requestId}] {msg}"
+        )
 
     def setRequestId(self, response: urllib3.HTTPResponse) -> None:
         """
@@ -120,12 +124,7 @@ class ExportContext:
         self.requestId = response.headers.get("RequestId")
 
     def requestWithRetry(
-        self,
-        httpMethod: str,
-        url: str,
-        maxInterval: int = 16,
-        baseInterval: int = 1,
-        **request_kwargs: Any,
+        self, httpMethod: str, url: str, maxInterval: int = 16, baseInterval: int = 1, **request_kwargs: Any
     ) -> urllib3.HTTPResponse:
         """Issue an HTTP request with automatic 429/back-off handling."""
 
@@ -139,7 +138,7 @@ class ExportContext:
                 return response  # caller must close/release via ResponseContextManager
 
             self.trace(f"Rate limited (status 429) on {url}")
-  
+
             retry_after = response.headers.get("Retry-After")
 
             # release connection before looping again.
@@ -155,9 +154,10 @@ class ExportContext:
             if delay:
                 self.trace(f"Sleeping {delay} seconds before retrying…")
                 time.sleep(delay)
-            
+
             if retry_after is None and delay < maxInterval:
                 delay = min(delay * 2, maxInterval)
+
 
 class ResponseContextManager:
     """Context manager for urllib3 response objects."""
@@ -190,10 +190,7 @@ def startExport(context: ExportContext) -> Optional[str]:
 
         with ResponseContextManager(
             context.requestWithRetry(
-                httpMethod="POST",
-                url=createUrl,
-                headers=context.headers,
-                body=json.dumps(context.exportRequest),
+                httpMethod="POST", url=createUrl, headers=context.headers, body=json.dumps(context.exportRequest)
             )
         ) as response:
             if response.status == 202:
@@ -204,7 +201,7 @@ def startExport(context: ExportContext) -> Optional[str]:
                 context.trace(f"Failed to start export. Status code: {response.status}")
                 context.trace(f"Response: {response.data.decode('utf-8')}")
                 return None
-    
+
     except Exception as e:
         context.trace(f"An error occurred: {e}")
         return None
@@ -230,29 +227,31 @@ def pollExportStatus(context: ExportContext, exportId: str) -> Tuple[str, urllib
     while status != "Succeeded" and status != "Failed":
         try:
             context.trace(f"Polling export status for {statusUrl}")
-            
-            with ResponseContextManager(context.requestWithRetry(httpMethod="GET", url=statusUrl, headers=context.headers)) as response:
+
+            with ResponseContextManager(
+                context.requestWithRetry(httpMethod="GET", url=statusUrl, headers=context.headers)
+            ) as response:
 
                 if response.status in [200, 202]:
                     rjson = response.json()
                     status = rjson.get("status")
                     pctComplete = rjson.get("percentComplete")
-                    context.trace(
-                        f"Export status: {status} ({pctComplete}%), sleeping {pollIntervalSeconds} seconds..."
-                    )
+                    context.trace(f"Export status: {status} ({pctComplete}%)")
                 else:
                     context.trace(f"Failed to get export status. Status code: {response.status}, url: {statusUrl}")
                     context.trace(f"Response: {response.data.decode('utf-8')}")
                     return "Failed", response
 
-                # take a break before polling again
-                if pctComplete < 100:
+                if pctComplete is None or pctComplete < 100 or status == "Running":
                     context.trace(f"Sleeping {pollIntervalSeconds} seconds...")
                     time.sleep(pollIntervalSeconds)
 
         except Exception as e:
-            context.trace(f"An error occurred: {e}")
+            context.trace(f"An error occurred: {e}, {response.data.decode('utf-8') if response else ''}")
             return "Failed", response
+
+    if status == "Failed":
+        context.trace(f"Export failed: {response.data.decode('utf-8')}")
 
     return status, response
 
@@ -277,38 +276,36 @@ def downloadFile(context: ExportContext, response: urllib3.HTTPResponse, exportI
         with ResponseContextManager(
             context.requestWithRetry(httpMethod="GET", url=downloadUrl, headers=context.headers, preload_content=False)
         ) as response:
-            if response.status == 200:
-                timestamp = time.strftime("%Y%m%d_%H%M%S")
+            if response.status != 200:
+                context.trace(f"Failed to download file. Status code: {response.status}, url: {downloadUrl}")
+                context.trace(f"Response: {response.data.decode('utf-8')}")
+                return
 
-                # consume the response stream, but do not write to disk:
-                if context.discardDownload:
-                    context.trace(f"Downloading file to /dev/null...")
-                    for chunk in response.stream(8192):
-                        if not chunk:
-                            break
-
-                    end_time = time.time()
-                    duration = end_time - start_time
-                    context.trace(f"Downloaded file to /dev/null in {duration:.2f} seconds")
-                    return
-
-                # write the response stream to a file:
-                os.makedirs("downloads", exist_ok=True)
-                fileExtension = context.exportRequest.get("format", "pdf").lower()
-                filename = f"downloads/export_{context.reportId}_{exportId[:20]}_{timestamp}.{fileExtension}"
-                with open(filename, "wb") as file:
-                    for chunk in response.stream(8192):
-                        if not chunk:
-                            break
-                        file.write(chunk)
+            # consume the response stream, but do not write to disk:
+            if context.discardDownload:
+                context.trace(f"Downloading file to /dev/null...")
+                for chunk in response.stream(8192):
+                    pass
 
                 end_time = time.time()
                 duration = end_time - start_time
-                file_size = os.path.getsize(filename)
-                context.trace(f"Downloaded file to {filename} in {duration:.2f} seconds, size: {file_size} bytes")
-            else:
-                context.trace(f"Failed to download file. Status code: {response.status}, url: {downloadUrl}")
-                context.trace(f"Response: {response.data.decode('utf-8')}")
+                context.trace(f"Downloaded file to /dev/null in {duration:.2f} seconds")
+                return
+
+            # write the response stream to a file:
+            os.makedirs("downloads", exist_ok=True)
+            fileExtension = context.exportRequest.get("format", "pdf").lower()
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"downloads/export_{context.reportId}_{exportId[:20]}_{timestamp}.{fileExtension}"
+            with open(filename, "wb") as file:
+                for chunk in response.stream(8192):
+                    file.write(chunk)
+
+            end_time = time.time()
+            duration = end_time - start_time
+            file_size = os.path.getsize(filename)
+            context.trace(f"Downloaded file to {filename} in {duration:.2f} seconds, size: {file_size} bytes")
+
     except Exception as e:
         context.trace(f"An error occurred: {e}")
 
@@ -324,6 +321,7 @@ def fullExport(context: ExportContext) -> None:
     if exportId:
         status, response = pollExportStatus(context, exportId)
         if status == "Succeeded" and response.status == 200:
+            # for i in range(10):
             downloadFile(context, response, exportId)
 
 
@@ -331,29 +329,27 @@ def main() -> None:
     """
     Main function to parse arguments and execute the export process.
     """
-    parser = argparse.ArgumentParser(description="Export reports concurrently.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Export reports concurrently. "
+            "Must set env var PBI_ACCESS_TOKEN for ppe environments. "
+            "Files will be saved in the downloads folder relative to the current directory."
+        )
+    )
     parser.add_argument(
         "--cluster",
         type=str,
-        choices=["localhost", "devbox", "onebox", "daily", "dxt", "msit", "prod"],
+        choices=["localhost", "devbox", "onebox", "edog", "daily", "dxt", "msit", "prod"],
         default="prod",
-        help="Cluster to use: (localhost,onebox,devbox), daily, dxt, msit, prod (default: prod)",
+        help="Cluster to use: (localhost,onebox,devbox), edog, daily, dxt, msit, prod (default: prod)",
     )
     parser.add_argument("--workspaceId", type=str, help="Workspace ID to export from")
-    parser.add_argument("--reportId", type=str, help="Report ID to export")
-    parser.add_argument("--concurrency", type=int, default=1, help="Number of concurrent exports")
+    parser.add_argument("--reportId", type=str, help="Report object ID to export")
+    parser.add_argument("--concurrency", type=int, default=1, help="Max number of concurrent exports")
     parser.add_argument("--numExports", type=int, default=1, help="Total number of exports to perform")
-    parser.add_argument(
-        "--discardDownload",
-        action="store_true",
-        help="Download the results but throw away the data",
-    )
+    parser.add_argument("--discardDownload", action="store_true", help="Stream in the results but throw away the data")
     parser.add_argument("--exportRequestFile", type=str, help="Path to the export request JSON file")
-    parser.add_argument(
-        "--httpDebug",
-        action="store_true",
-        help="Enable detailed HTTP request/response logging",
-    )
+    parser.add_argument("--httpDebug", action="store_true", help="Enable detailed HTTP request/response logging")
     args = parser.parse_args()
 
     if args.httpDebug:
@@ -382,10 +378,7 @@ def main() -> None:
             )
         accessToken = accessToken.token
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {accessToken}",
-    }
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {accessToken}"}
 
     # Read export request from file if provided, otherwise use default
     if args.exportRequestFile:
@@ -409,6 +402,8 @@ def main() -> None:
     # You can get the host from the service in web tools
     if args.cluster == "localhost" or args.cluster == "onebox" or args.cluster == "devbox":
         host = "https://onebox-redirect.analysis.windows-int.net"
+    elif args.cluster == "edog":
+        host = "https://biazure-int-edog-redirect.analysis-df.windows.net"
     elif args.cluster == "daily":
         host = "https://wabi-daily-us-east2-redirect.analysis.windows.net"
     elif args.cluster == "dxt":
@@ -418,32 +413,26 @@ def main() -> None:
     elif args.cluster == "prod":
         host = "https://api.powerbi.com"
     else:
-        raise ValueError("Invalid cluster. Choose from one of: localhost, onebox, devbox, daily, dxt, msit, or prod.")
+        raise ValueError("Invalid cluster. Choose from one of: localhost, onebox, devbox, edog, daily, dxt, msit, or prod.")
 
     # one pool manager for all threads
     with urllib3.PoolManager(retries=False) as http:
-   
+
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
 
             # pump all requests into the thread pool queue
             futures = []
-            for i in range(numExports):        
+            for i in range(numExports):
                 # each request has its own context:
                 future = executor.submit(
                     fullExport,
                     ExportContext(
-                        i+1,
-                        http,
-                        accessToken,
-                        workspaceId,
-                        reportId,
-                        host,
-                        headers,
-                        exportRequest,
-                        discardDownload))
-                
+                        i + 1, http, accessToken, workspaceId, reportId, host, headers, exportRequest, discardDownload
+                    ),
+                )
+
                 futures.append(future)
-            
+
             # wait for all futures to complete
             for future in futures:
                 future.result()
